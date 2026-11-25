@@ -190,31 +190,37 @@ POST /ask?question=Hello -> HTTP 200
 - [app/main.py](06-lab-complete/app/main.py): `JsonFormatter` xuất 1 JSON object/dòng, `lifespan` đóng Redis khi shutdown, `/health` luôn 200, `/ready` 200/503 theo Redis, `/ask` nối `verify_api_key` → `check_rate_limit` → `check_budget` → `llm_ask` → `record_cost`.
 - [Dockerfile](06-lab-complete/Dockerfile), [docker-compose.yml](06-lab-complete/docker-compose.yml), [.dockerignore](06-lab-complete/.dockerignore), [.env.example](06-lab-complete/.env.example), [railway.toml](06-lab-complete/railway.toml), [render.yaml](06-lab-complete/render.yaml).
 
-### Output `python check_production_ready.py --static-only`
-*(Toàn bộ 28/28 kiểm tra tĩnh đều ✅, không có mục nào ❌; các mục runtime/Docker chưa chạy do chưa có Docker/Redis trên máy Windows)*:
+### Output `python check_production_ready.py` (chạy đầy đủ trên GitHub Codespaces — Ubuntu Linux, Docker 29.9.2-2, Python 3.11)
 
 ```text
-🔎 Kiểm tra D:\K5-L3A-DAY14-DuongTuanHung-2A202603416-Deployment-Benchmark-Observability\06-lab-complete
+🔎 Kiểm tra /workspaces/K5-L3A-DAY14-DuongTuanHung-2A202603416-Deployment-Benchmark-Observability/06-lab-complete
   ⏳ Kiểm tra tĩnh: file, Dockerfile, compose, config, code...
+  ⏳ Chuẩn bị Redis cho bài test stateless...
+  ⏳ Khởi động agent: uvicorn app.main:app --workers 2 (Redis: container redis:7-alpine tạm thời)
+  ⏳ Restart agent để kiểm tra stateless...
+  ⏳ Kiểm tra readiness khi Redis mất kết nối...
+  ⏳ Kiểm tra cost guard (budget ≈ 0)...
+  ⏳ Kiểm tra graceful shutdown (SIGTERM)...
+  ⏳ Build Docker image prod-check:264ec3cb (Docker 29.9.2-2) — lần đầu có thể mất vài phút...
 
 ================================================================
   Production Readiness Check — Day 14 Lab
 ================================================================
 
-⚠️  1. Dockerfile (multi-stage, < 500 MB)
+✅ 1. Dockerfile (multi-stage, < 500 MB)
      ✅ Dockerfile tồn tại
      ✅ requirements.txt tồn tại
      ✅ Multi-stage build (≥ 2 lệnh FROM)
      ✅ Base image gọn (slim / alpine / distroless) — stage cuối dùng python:3.11-slim
      ✅ Chạy bằng user non-root
      ✅ Có HEALTHCHECK
-     ⚠️  Docker: build image thành công — chưa chạy (--static-only)
-     ⚠️  Docker: image < 500 MB — chưa chạy (--static-only)
-     ⚠️  Docker: container chạy được, GET /health → 200 — chưa chạy (--static-only)
+     ✅ Docker: build image thành công — 5s
+     ✅ Docker: image < 500 MB — 238 MB
+     ✅ Docker: container chạy được, GET /health → 200
 
 ✅ 2. docker-compose.yml (agent + redis)
      ✅ docker-compose.yml tồn tại
-     ✅ Có service agent (build từ Dockerfile) + redis — services: agent, redis — đọc bằng PyYAML
+     ✅ Có service agent (build từ Dockerfile) + redis — services: agent, redis — đọc bằng docker compose config
      ✅ Service agent kết nối redis (REDIS_URL + depends_on)
 
 ✅ 3. .dockerignore
@@ -222,44 +228,44 @@ POST /ask?question=Hello -> HTTP 200
      ✅ .dockerignore loại trừ .env (secrets)
      ✅ .dockerignore loại trừ __pycache__, venv
 
-⚠️  4. Health check endpoint (GET /health)
+✅ 4. Health check endpoint (GET /health)
      ✅ Code có route /health
-     ⚠️  Khi chạy: GET /health → 200 — chưa chạy (--static-only)
+     ✅ Khi chạy: GET /health → 200 — uvicorn --workers 2
 
-⚠️  5. Readiness endpoint (GET /ready)
+✅ 5. Readiness endpoint (GET /ready)
      ✅ Code có route /ready
-     ⚠️  Khi chạy: GET /ready → 200 — chưa chạy (--static-only)
-     ⚠️  Khi chạy: Redis mất kết nối → /ready 503 (còn /health vẫn 200) — chưa chạy (--static-only)
+     ✅ Khi chạy: GET /ready → 200
+     ✅ Khi chạy: Redis mất kết nối → /ready 503 (còn /health vẫn 200)
 
-⚠️  6. API Key authentication
+✅ 6. API Key authentication
      ✅ Code đọc header X-API-Key
-     ⚠️  Khi chạy: thiếu / sai API key → 401 — chưa chạy (--static-only)
-     ⚠️  Khi chạy: API key đúng → 200 — chưa chạy (--static-only)
+     ✅ Khi chạy: thiếu / sai API key → 401
+     ✅ Khi chạy: API key đúng → 200
 
-⚠️  7. Rate limiting
+✅ 7. Rate limiting
      ✅ Code trả HTTP 429 khi vượt giới hạn
-     ⚠️  Khi chạy: vượt giới hạn → 429 — chưa chạy (--static-only)
-     ⚠️  Khi chạy: state nằm trong Redis — restart agent vẫn bị 429 — chưa chạy (--static-only)
+     ✅ Khi chạy: vượt giới hạn → 429 — 429 sau 5 request thành công (RATE_LIMIT_PER_MINUTE=5)
+     ✅ Khi chạy: state nằm trong Redis — restart agent vẫn bị 429
 
-⚠️  8. Cost guard
+✅ 8. Cost guard
      ✅ Code trả HTTP 402 khi hết budget
-     ⚠️  Khi chạy: hết budget → 402 — chưa chạy (--static-only)
+     ✅ Khi chạy: hết budget → 402 — 402 ở request thứ 1
 
-⚠️  9. Config từ environment variables
+✅ 9. Config từ environment variables
      ✅ app/config.py đọc biến môi trường
      ✅ .env.example liệt kê đủ biến cấu hình
      ✅ .env nằm trong .gitignore
      ✅ Không hard-code secret trong code
-     ⚠️  Khi chạy: agent dùng AGENT_API_KEY và RATE_LIMIT_PER_MINUTE từ env — chưa chạy (--static-only)
+     ✅ Khi chạy: agent dùng AGENT_API_KEY và RATE_LIMIT_PER_MINUTE từ env
 
-⚠️  10. Structured logging
+✅ 10. Structured logging
      ✅ Code ghi log dạng JSON
-     ⚠️  Khi chạy: mọi dòng log của app là JSON hợp lệ — chưa chạy (--static-only)
+     ✅ Khi chạy: mọi dòng log của app là JSON hợp lệ — 17 dòng JSON
 
-⚠️  11. Graceful shutdown
+✅ 11. Graceful shutdown
      ✅ Code xử lý SIGTERM / lifespan shutdown
-     ⚠️  Khi chạy: SIGTERM lúc đang có request → request vẫn 200, process tự thoát — chưa chạy (--static-only)
-     ⚠️  Docker: `docker stop` tắt êm (exit code 0, < 10s) — chưa chạy (--static-only)
+     ✅ Khi chạy: SIGTERM lúc đang có request → request vẫn 200, process tự thoát — exit code 0
+     ✅ Docker: `docker stop` tắt êm (exit code 0, < 10s) — exit code 0, 0.5s
 
 ✅ 12. Public URL ready (Railway / Render config)
      ✅ Có railway.toml hoặc render.yaml (không chỉ toàn comment)
@@ -270,20 +276,22 @@ POST /ask?question=Hello -> HTTP 200
 
 ================================================================
   📋 Checklist Deliverable
-     ⚠️  Dockerfile (multi-stage, < 500 MB)
+     ✅ Dockerfile (multi-stage, < 500 MB)
      ✅ docker-compose.yml (agent + redis)
      ✅ .dockerignore
-     ⚠️  Health check endpoint (GET /health)
-     ⚠️  Readiness endpoint (GET /ready)
-     ⚠️  API Key authentication
-     ⚠️  Rate limiting
-     ⚠️  Cost guard
-     ⚠️  Config từ environment variables
-     ⚠️  Structured logging
-     ⚠️  Graceful shutdown
+     ✅ Health check endpoint (GET /health)
+     ✅ Readiness endpoint (GET /ready)
+     ✅ API Key authentication
+     ✅ Rate limiting
+     ✅ Cost guard
+     ✅ Config từ environment variables
+     ✅ Structured logging
+     ✅ Graceful shutdown
      ✅ Public URL ready (Railway / Render config)
 ----------------------------------------------------------------
-  Result: 3/12 tiêu chí đạt · 28/28 checks passed
+  Result: 12/12 tiêu chí đạt · 43/43 checks passed
+  🎉 PASS 12/12 — PRODUCTION READY! Deploy nào!
+================================================================
 ```
 
 **Kiểm thử runtime cục bộ với `TestClient` + in-memory Redis stub:**
