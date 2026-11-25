@@ -119,12 +119,21 @@ agent_info{model="mock-llm-small",version="v2"} 1.0
 
 ## 5. Benchmark scaling (production, Locust headless, 100 users, 2 phút)
 
+Số liệu lấy trực tiếp từ [scale_1_stats.csv](benchmark-results/scale_1_stats.csv) và [scale_3_stats.csv](benchmark-results/scale_3_stats.csv) (chạy trên GitHub Codespaces, Docker Compose `-p k5-day14-observability`):
+
+### Tổng hợp (`Aggregated` — `POST /ask` + `GET /health`)
 | Số instance | RPS | p50 (ms) | p95 (ms) | p99 (ms) | Failures |
 |---|---|---|---|---|---|
-| 1 | *(chưa chạy Docker)* | | | | |
-| 3 | *(chưa chạy Docker)* | | | | |
+| 1 | 65.26 | 190 | 260 | 1700 | 82 / 7780 (1.05%) |
+| 3 | 65.93 | 190 | 240 | 1700 | 66 / 7859 (0.84%) |
 
-**Giải thích kết quả:** Khi tăng từ 1 lên 3 instance sau Nginx, tổng throughput (RPS) tăng và tình trạng quá tải event loop / CPU contention ở concurrency cao giảm (như đã thấy khi test concurrency 50 → 100 trên 1 process ở mục 2.1). Tuy nhiên, `p95` của một request đơn lẻ **khó giảm xuống dưới latency tự nhiên của LLM** nếu nút thắt nằm ở thời gian chờ upstream LLM (`chat mock-llm-*` ~120–180ms và 3% slow ~1.7s) — scale ngang giúp tăng khả năng chịu tải đồng thời chứ không làm LLM trả lời nhanh hơn.
+### Riêng endpoint `POST /ask`
+| Số instance | RPS | p50 (ms) | p95 (ms) | p99 (ms) | Failures |
+|---|---|---|---|---|---|
+| 1 | 59.93 | 200 | 260 | 1700 | 82 / 7144 (1.15%) |
+| 3 | 60.08 | 200 | 250 | 1700 | 66 / 7162 (0.92%) |
+
+**Giải thích kết quả:** Scale lên 3 instance chỉ giúp `p95` giảm nhẹ (`260ms → 250ms` ở `/ask`, `260ms → 240ms` tổng hợp; riêng `/health` giảm rõ `33ms → 23ms` ở p95 và `83ms → 45ms` ở p99 do bớt tranh chấp event loop), còn `p50` (`200ms`) và `p99` (`1700ms`) gần như giữ nguyên. Nguyên nhân là agent chạy `async` nên ở mức tải ~65 req/s, 1 instance chưa bị bão hòa CPU; **nút thắt nằm ở latency tự nhiên của upstream LLM call** (`chat mock-llm-small` mất ~120–180ms + ~20ms retrieval và 3% request slow cộng thêm ~1500ms), nên tăng số replica không thể làm LLM trả lời nhanh hơn. Tỉ lệ failure ~1% (`1.15%` và `0.92%`) khớp với `MOCK_ERROR_RATE=0.01` mặc định của mock LLM.
 
 ---
 
