@@ -50,6 +50,6 @@ curl -sS -o /dev/null -w '%{http_code}\n' -X POST "$BASE/ask" \
 - `LOG_LEVEL` (`INFO`)
 
 ## Screenshots
-- [Deployment dashboard](screenshots/dashboard.png) *(bổ sung ảnh từ Railway Dashboard)*
-- [Service running](screenshots/running.png) *(bổ sung ảnh log/service đang chạy trên Railway)*
-- [Test results](screenshots/test.png) *(bổ sung ảnh kết quả chạy 4 lệnh CP6)*
+- [Deployment dashboard](screenshots/dashboard.png)
+- [Service running](screenshots/running.png)
+- [Test results](screenshots/test.png)
