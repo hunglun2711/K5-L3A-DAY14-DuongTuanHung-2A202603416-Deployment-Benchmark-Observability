@@ -1,0 +1,139 @@
+# Benchmark & Observability Report — Day 14
+
+> Mọi con số dưới đây được ghi nhận trực tiếp từ các file JSON trong `reports/` và output thực thi trên máy ngày 2026-11-25, không ước lượng.
+
+**Họ tên:** Dương Tuấn Hưng (MSSV: 2A202603416 · Lớp: K5-L3A)  
+**Ngày chạy:** 2026-11-25  
+**Môi trường:** Windows 10 (10.0.19045), Intel Core i5-1135G7 @ 2.40GHz, Python 3.11.15 (`.venv`, chạy local không Docker do lỗi Windows `0x800f0922` khi bật WSL2/VirtualMachinePlatform)
+
+---
+
+## 1. SLO của agent
+
+| SLI | SLO | Lý do chọn ngưỡng này |
+|---|---|---|
+| p95 latency `/ask` | < 500 ms | 95% người dùng nhận phản hồi trong dưới nửa giây (trải nghiệm mượt khi LLM mock latency nền ~120–180ms + retrieval ~20ms), tránh để tail latency ở mức 3% làm hỏng p95 |
+| Error rate `/ask` | < 2.0 % | Mock LLM có tỉ lệ lỗi upstream ngẫu nhiên mặc định ~1%; đặt ngưỡng 2% cho phép dung sai error budget nhỏ trước khi coi là sự cố |
+| Accuracy trên golden dataset | ≥ 85 % | Đảm bảo chất lượng RAG của agent v2 ổn định khi thay đổi prompt/KB/model và chặn các PR làm giảm chất lượng (regression = 0) |
+
+---
+
+## 2. Benchmark hiệu năng (develop, `load_test.py`)
+
+### 2.1 Concurrency vs latency (agent v2)
+
+Chạy `python load_test.py --url http://127.0.0.1:8002 --requests 300 --concurrency <c>` (lưu tại [reports/](reports/)):
+
+| Concurrency | RPS | p50 (ms) | p95 (ms) | p99 (ms) | Error rate | SLO |
+|---|---|---|---|---|---|---|
+| 1 | 4.22 | 202.8 | 246.9 | 1714.6 | 2.00% | PASS |
+| 10 | 47.68 | 196.4 | 232.6 | 328.6 | 1.67% | PASS |
+| 50 | 99.66 | 216.9 | 761.3 | 1728.4 | 1.67% | FAIL (p95 > 500ms) |
+| 100 | 46.64 | 727.4 | 4374.3 | 5011.1 | 1.33% | FAIL (p95 > 500ms) |
+
+**Nhận xét:** RPS có tăng tuyến tính theo concurrency không? Vì sao?
+
+RPS **không tăng tuyến tính**. Từ concurrency 1 → 10, RPS tăng gần tuyến tính (`4.22 → 47.68 req/s`, gấp ~11.3x) vì agent xử lý `async` nên chờ I/O song song hiệu quả và p50/p95 gần như không đổi (~200–247ms). Từ 10 → 50, RPS chỉ tăng hơn gấp đôi (`47.68 → 99.66 req/s`) nhưng p95 bắt đầu tăng vọt lên `761.3 ms` (vi phạm SLO). Tới concurrency `100`, hệ thống bị nghẽn (saturation) ở 1 process uvicorn + event loop/socket trên Windows khiến RPS **giảm ngược** xuống `46.64 req/s`, p50 tăng lên `727.4 ms` và p95 vọt lên `4374.3 ms`.
+
+### 2.2 Tail latency
+
+Chạy cùng `--requests 300 --concurrency 20` trên agent v2 với 3 mức `MOCK_SLOW_RATE`:
+
+| `MOCK_SLOW_RATE` | avg (ms) | p95 (ms) | p99 (ms) |
+|---|---|---|---|
+| 0 | 191.1 | 226.7 | 234.3 |
+| 0.03 (mặc định) | 252.8 | 245.2 | 1720.0 |
+| 0.1 | 312.2 | 1698.1 | 1716.0 |
+
+**Nhận xét:** Chỉ số nào nhạy nhất với request chậm? Vì sao SLO không nên đặt theo average?
+
+`p99` (và tiếp theo là `p95` khi tỉ lệ request chậm vượt 5%) nhạy nhất với tail latency: khi `MOCK_SLOW_RATE` tăng từ `0` lên `0.03` (chỉ 3% request bị chậm), `avg` chỉ nhích nhẹ `+61.7 ms` (`191.1 → 252.8 ms`), nhưng `p99` nhảy vọt hơn 7 lần (`234.3 → 1720.0 ms`). Khi `MOCK_SLOW_RATE=0.1` (10% request chậm > 5%), `avg` vẫn trông chấp nhận được ở `312.2 ms`, nhưng `p95` đã vọt lên `1698.1 ms` (gấp 3.4 lần ngưỡng SLO 500ms). Do đó không thể đặt SLO theo `average`, vì giá trị trung bình làm mượt và che giấu nhóm người dùng đang phải chờ gần 2 giây.
+
+---
+
+## 3. Benchmark chất lượng (develop, `eval/run_eval.py`)
+
+| Chỉ số | Agent v1 | Agent v2 | Agent v2 (sau khi sửa KB) |
+|---|---|---|---|
+| Accuracy | 4.3% (1/23) | 91.3% (21/23) | 100.0% (23/23) |
+| Avg tokens / câu | 57.7 | 109.0 | 113.7 |
+| Tổng cost (USD) | $0.000413 | $0.000759 | $0.000790 |
+| Cost / câu đúng (USD) | $0.00041295 | $0.00003616 | $0.00003436 |
+| Quality gate | FAIL | PASS (so với v1, ≥80%) | PASS (23/23, ≥100%, 0 regression) |
+
+**Những câu v2 trả lời sai ban đầu và cách bạn sửa:**
+
+| ID | Keyword bị thiếu | Bạn đã sửa gì |
+|---|---|---|
+| `security-02` | `token`, `hết hạn`, `chữ ký` | Thêm entry `(["jwt"], ...)` giải thích JWT có chữ ký số, chứa thông tin user và thời điểm hết hạn vào `KNOWLEDGE_BASE` trong `develop/utils/mock_llm.py` và `production/utils/mock_llm.py` |
+| `scaling-03` | `cpu`, `memory`, `custom metrics` | Thêm entry `(["hpa", "kubernetes", "autoscal"], ...)` giải thích Kubernetes HPA scale pod theo CPU, memory hoặc custom metrics vào `KNOWLEDGE_BASE` trong cả `develop` và `production` |
+
+**Nhận xét về trade-off chất lượng / chi phí / latency giữa v1 và v2:**
+
+Agent v2 thêm bước retrieval (RAG) nên prompt dài hơn: số token trung bình mỗi câu tăng gần gấp đôi (`57.7 → 109.0–113.7` tokens/câu), kéo theo tổng chi phí cho 23 câu tăng từ `$0.000413` lên `$0.000790` và thêm ~20ms retrieval latency. Tuy nhiên, độ chính xác nhảy từ `4.3%` (1/23) lên `100.0%` (23/23), khiến **chi phí trên mỗi câu trả lời đúng** của v2 (`$0.00003436`) **rẻ hơn ~12 lần** so với v1 (`$0.00041295`). Việc thêm bước retrieval là hoàn toàn xứng đáng.
+
+**CI Quality Gate ([.github/workflows/eval.yml](.github/workflows/eval.yml)):**
+
+Đã tạo GitHub Actions workflow chạy `python eval/run_eval.py --url http://localhost:8000 --min-accuracy 0.85` trên mỗi `pull_request`. Khi chạy thử kiểm chứng trên `v1` so với baseline `eval_v2.json`, `run_eval.py` phát hiện 20 câu bị regression và trả về **exit code 1** (`Quality gate ... ❌ FAIL`), giúp CI tự động chặn merge PR nếu code mới làm giảm độ chính xác hoặc gây regression.
+
+---
+
+## 4. Observability stack (production)
+
+> **Lưu ý môi trường:** Do Docker Desktop/WSL2 không chạy được trên máy Windows hiện tại (lỗi Windows `0x800f0922`), stack Docker Compose (`prometheus`, `grafana`, `jaeger`, `locust`, `nginx`) chưa thể khởi chạy để chụp screenshot. Thực hiện chạy trực tiếp `production/app/main.py` bằng Python (theo hướng dẫn partial credit trong [INSTRUCTOR_GUIDE.md](INSTRUCTOR_GUIDE.md)) để kiểm chứng `/metrics`, JSON log và phân tích PromQL / alert rules:
+
+**Mẫu output `/metrics` và JSON log thu được trực tiếp từ `06-lab-complete/benchmark-observability/production/app/main.py` (`TRACING_ENABLED=false`, `AGENT_VERSION=v2`):**
+```text
+http_requests_total{method="GET",route="/health",status="200"} 1.0
+http_requests_total{method="POST",route="/ask",status="200"} 2.0
+agent_in_flight_requests 0.0
+llm_requests_total{model="mock-llm-small",status="ok"} 2.0
+llm_tokens_total{model="mock-llm-small",type="input"} 150.0
+llm_tokens_total{model="mock-llm-small",type="output"} 77.0
+llm_cost_usd_total{model="mock-llm-small"} 6.869999999999999e-05
+agent_info{model="mock-llm-small",version="v2"} 1.0
+```
+```json
+{"ts": "2026-11-25T08:56:51.818186+00:00", "level": "INFO", "service": "observable-agent", "instance": "local", "event": "llm_call", "trace_id": "", "span_id": "", "request_id": "10bca39d6cd5", "model": "mock-llm-small", "agent_version": "v2", "input_tokens": 81, "output_tokens": 46, "cost_usd": 4e-05, "llm_ms": 192.1}
+{"ts": "2026-11-25T08:56:51.818864+00:00", "level": "INFO", "service": "observable-agent", "instance": "local", "event": "http_request", "trace_id": "", "span_id": "", "request_id": "10bca39d6cd5", "method": "POST", "route": "/ask", "status": 200, "ms": 219.5}
+```
+
+### 4.1 Screenshot
+- [ ] Dashboard Grafana khi đang có tải *(chưa có vì máy không chạy được Docker)*
+- [ ] Một trace chậm trong Jaeger *(chưa có vì máy không chạy được Docker)*
+- [ ] Một trace lỗi trong Jaeger *(chưa có vì máy không chạy được Docker)*
+- [ ] Trang Alerts của Prometheus với ít nhất 1 alert đang **firing** *(chưa có vì máy không chạy được Docker)*
+
+### 4.2 Phân tích Exercise 7.4 & Các alert rules trong `prometheus/alert_rules.yml`
+
+- **Tại sao `curl http://localhost:8080/metrics` trả về 404 (Exercise 7.4):** Trong [nginx.conf](06-lab-complete/benchmark-observability/production/nginx/nginx.conf), `location = /metrics { return 404; }` chủ động chặn truy cập `/metrics` từ bên ngoài để tránh lộ thông tin nội bộ (route, lưu lượng, model, chi phí); chỉ Prometheus trong mạng nội bộ `obs_net` mới scrape trực tiếp `agent:8000/metrics`.
+- **Tại sao `input_tokens > output_tokens`:** Trong `mock_llm.py`, prompt đầu vào của v2 gồm `SYSTEM_PROMPT + context (tài liệu RAG) + question` (~70–95 tokens), dài hơn câu trả lời ngắn gọn ở đầu ra (~30–55 tokens). Thực tế chạy 2 câu trên `production/app` ghi nhận `input=150` tokens so với `output=77` tokens.
+- **Thí nghiệm E (`AGENT_VERSION=v1`) không làm alert nào firing — cách phát hiện trong production:**
+  Các alert hạ tầng (`AgentHighErrorRate`, `AgentHighLatencyP95`, `AgentInstanceDown`, `LLMCostBurnRateHigh`) chỉ đo HTTP status 5xx, latency, `up` và cost — khi đổi về `v1`, agent vẫn trả `HTTP 200` rất nhanh và còn tốn ít tiền hơn nên mọi panel hạ tầng đều xanh. Để phát hiện sự cố suy giảm chất lượng này trong production, phải chạy **eval trên golden dataset làm quality gate trong CI/CD** trước khi deploy (như `.github/workflows/eval.yml`), kết hợp giám sát metric chất lượng như `agent_retrieval_requests_total{outcome="hit"|"miss"}` (retrieval hit ratio giảm về 0), feedback người dùng và chạy LLM-as-judge / online eval trên mẫu traffic thật.
+- **Thí nghiệm D (`docker pause` thay vì `docker stop` và lỗi 504 ở Nginx):** `docker stop` làm container biến mất khỏi Docker DNS nên Prometheus không còn thấy target để báo `up == 0`; `docker pause` giữ nguyên IP trong DNS nhưng container treo nên Prometheus scrape lỗi → `up == 0` sau 30s (`AgentInstanceDown`). Lỗi 504 do Nginx timeout (`proxy_read_timeout 10s`) xảy ra trước khi agent trả response, nên `http_requests_total` của agent không ghi nhận — cần theo dõi cả metric của Nginx và synthetic monitoring từ bên ngoài.
+
+### 4.3 Debug bằng trace
+- Trong `06-lab-complete/benchmark-observability/production/app/main.py`, mỗi request tạo cây span: `POST /ask` → `agent.run` → `agent.retrieve_context` + `chat <llm_model>`. Span chiếm nhiều thời gian nhất khi có tail latency là `chat mock-llm-small` (hoặc `chat mock-llm-large`). Dòng log JSON ghi kèm `trace_id` và `span_id` từ `current_trace_ids()` để tra cứu chéo trực tiếp sang Jaeger. *(Chưa có `trace_id` thật từ Jaeger vì chưa chạy được container Jaeger).*
+
+---
+
+## 5. Benchmark scaling (production, Locust headless, 100 users, 2 phút)
+
+| Số instance | RPS | p50 (ms) | p95 (ms) | p99 (ms) | Failures |
+|---|---|---|---|---|---|
+| 1 | *(chưa chạy Docker)* | | | | |
+| 3 | *(chưa chạy Docker)* | | | | |
+
+**Giải thích kết quả:** Khi tăng từ 1 lên 3 instance sau Nginx, tổng throughput (RPS) tăng và tình trạng quá tải event loop / CPU contention ở concurrency cao giảm (như đã thấy khi test concurrency 50 → 100 trên 1 process ở mục 2.1). Tuy nhiên, `p95` của một request đơn lẻ **khó giảm xuống dưới latency tự nhiên của LLM** nếu nút thắt nằm ở thời gian chờ upstream LLM (`chat mock-llm-*` ~120–180ms và 3% slow ~1.7s) — scale ngang giúp tăng khả năng chịu tải đồng thời chứ không làm LLM trả lời nhanh hơn.
+
+---
+
+## 6. Kết luận
+
+- **3 điều học được về benchmark & observability:**
+  1. Latency trung bình (`avg`) che giấu rất tốt vấn đề tail latency: chỉ 3% request chậm đã đẩy `p99` lên ~1.7s trong khi `avg` chỉ nhích nhẹ, nên SLO bắt buộc phải đặt theo `p95`/`p99`.
+  2. Benchmark hiệu năng và benchmark chất lượng giải quyết 2 bài toán độc lập: agent v1 nhanh và rẻ hơn mỗi câu nhưng accuracy chỉ 4.3%, trong khi v2 dùng RAG đắt hơn ~2x mỗi câu nhưng **cost / câu đúng rẻ hơn ~12x** và đạt 100% sau khi bổ sung Knowledge Base.
+  3. Metrics (Prometheus), Traces (OpenTelemetry/Jaeger) và JSON Logs gắn `trace_id` bổ trợ lẫn nhau, nhưng giám sát hạ tầng thuần túy không bắt được lỗi chất lượng (`AGENT_VERSION=v1`) — cần kết hợp CI quality gate (`run_eval.py`) và metric nghiệp vụ (`retrieval_hit`).
+- **Nếu đưa agent này lên production thật, sẽ thêm metric / alert nào nữa?**
+  - Metric `rate_limit_exceeded_total` (HTTP 429) và `budget_exceeded_total` (HTTP 402) để phát hiện sớm hành vi lạm dụng API key hoặc client sắp chạm ngưỡng ngân sách.
+  - Metric tỷ lệ retrieval miss (`agent_retrieval_requests_total{outcome="miss"} / total`) kèm alert khi tỉ lệ miss tăng đột biến, và online eval score (LLM-as-judge trên mẫu 5–10% traffic thật) để phát hiện sớm hiện tượng model/prompt drift.
