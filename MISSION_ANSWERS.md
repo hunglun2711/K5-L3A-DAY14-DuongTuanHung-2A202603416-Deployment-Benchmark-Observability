@@ -86,7 +86,13 @@ Client ──(:80 / :443)──▶ Nginx (reverse proxy, rate limit, security he
 
 ### Exercise 3.1 – 3.2: Triển khai & So sánh `railway.toml` vs `render.yaml`
 
-- **URL public (Part 6):** *(Chưa deploy lên cloud trong bước offline này — xem cấu hình sẵn sàng deploy trong [06-lab-complete/railway.toml](06-lab-complete/railway.toml) và [06-lab-complete/render.yaml](06-lab-complete/render.yaml), hướng dẫn chi tiết trong [DEPLOYMENT.md](DEPLOYMENT.md)).*
+- **URL public (Part 6 trên Railway):** `https://ai-agent-production-968b6e9d.up.railway.app` (xem chi tiết lệnh test và biến môi trường trong [DEPLOYMENT.md](DEPLOYMENT.md))
+- **Kết quả kiểm tra CP6 trên Railway (có managed Redis):**
+  - `GET /health` → `200` (`{"status":"ok","environment":"production",...}`)
+  - `GET /ready` → `200` (`{"status":"ready","redis":"ok"}`)
+  - `POST /ask` (không có `X-API-Key`) → `401` (`{"detail":"Invalid or missing API key"}`)
+  - `POST /ask` (có `X-API-Key` hợp lệ) → `200` (`{"question":"What is deployment?","answer":"Deployment là quá trình đưa code từ máy bạn lên server để người khác dùng được.",...}`)
+  - `python check_production_ready.py --static-only --public-url https://ai-agent-production-968b6e9d.up.railway.app` → `Public URL: GET .../health → 200 ✅`
 - **So sánh `railway.toml` vs `render.yaml`:**
 
 | Tiêu chí | `railway.toml` | `render.yaml` |
