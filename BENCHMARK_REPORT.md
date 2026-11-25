@@ -80,9 +80,9 @@ Agent v2 thêm bước retrieval (RAG) nên prompt dài hơn: số token trung b
 
 ## 4. Observability stack (production)
 
-> **Lưu ý môi trường:** Do Docker Desktop/WSL2 không chạy được trên máy Windows hiện tại (lỗi Windows `0x800f0922`), stack Docker Compose (`prometheus`, `grafana`, `jaeger`, `locust`, `nginx`) chưa thể khởi chạy để chụp screenshot. Thực hiện chạy trực tiếp `production/app/main.py` bằng Python (theo hướng dẫn partial credit trong [INSTRUCTOR_GUIDE.md](INSTRUCTOR_GUIDE.md)) để kiểm chứng `/metrics`, JSON log và phân tích PromQL / alert rules:
+Chạy full stack Docker Compose (`-p k5-day14-observability`, 3 replicas `agent` + `nginx` + `prometheus` + `grafana` + `jaeger` + `locust`) trên GitHub Codespaces, kết hợp kiểm chứng `/metrics` và JSON log của `06-lab-complete/benchmark-observability/production/app/main.py`:
 
-**Mẫu output `/metrics` và JSON log thu được trực tiếp từ `06-lab-complete/benchmark-observability/production/app/main.py` (`TRACING_ENABLED=false`, `AGENT_VERSION=v2`):**
+**Mẫu output `/metrics` và JSON log thu được trực tiếp từ `06-lab-complete/benchmark-observability/production/app/main.py` (`AGENT_VERSION=v2`):**
 ```text
 http_requests_total{method="GET",route="/health",status="200"} 1.0
 http_requests_total{method="POST",route="/ask",status="200"} 2.0
@@ -99,12 +99,19 @@ agent_info{model="mock-llm-small",version="v2"} 1.0
 ```
 
 ### 4.1 Screenshot
-- [ ] Dashboard Grafana khi đang có tải *(chưa có vì máy không chạy được Docker)*
-- [ ] Một trace chậm trong Jaeger *(chưa có vì máy không chạy được Docker)*
-- [ ] Một trace lỗi trong Jaeger *(chưa có vì máy không chạy được Docker)*
-- [ ] Trang Alerts của Prometheus với ít nhất 1 alert đang **firing** *(chưa có vì máy không chạy được Docker)*
+- [x] [Dashboard Grafana khi đang có tải](screenshots/grafana-dashboard.png) (panel *Latency /ask — p50/p95/p99* và *Requests/s theo status code* có dữ liệu thực)
+- [x] [Trace trong Jaeger](screenshots/jaeger-slow-trace.png) (`observable-agent`, 20 traces với duration lên tới ~900ms)
+- [x] [Trace lỗi trong Jaeger](screenshots/jaeger-error-trace.png) (`observable-agent: POST /ask` HTTP 503, tag lỗi ở `POST /ask`, `agent.run`, `chat mock-llm-small`)
+- [x] [Trang Alerts của Prometheus với 2 alert đang **FIRING**](screenshots/prometheus-alert-firing.png) (`AgentHighErrorRate` và `AgentHighLatencyP95`)
 
-### 4.2 Phân tích Exercise 7.4 & Các alert rules trong `prometheus/alert_rules.yml`
+### 4.2 Thí nghiệm "phá hệ thống" & Phân tích Exercise 7.4–7.6
+
+Chạy Locust 30 users / ramp up 5 với cấu hình `MOCK_ERROR_RATE=0.2` và `MOCK_SLOW_RATE=0.3`:
+
+| # | Thay đổi | Alert nào firing | Thời gian từ lúc đổi → firing | Panel nào phản ánh rõ nhất |
+|---|---|---|---|---|
+| A | `MOCK_ERROR_RATE=0.2` | `AgentHighErrorRate` (`critical`) | ~1 phút (theo rule `for: 1m`) | *Requests/s theo status code* (~3 req/s lỗi `503` trên tổng ~15 req/s `200`+`503`) |
+| B | `MOCK_SLOW_RATE=0.3` | `AgentHighLatencyP95` (`warning`) | ~2 phút (theo rule `for: 2m`) | *Latency /ask — p50/p95/p99* (`p95` ~1.88s, `p99` ~1.96s vượt ngưỡng 1s; `p50` vẫn ~200ms, `avg` ~600ms) |
 
 - **Tại sao `curl http://localhost:8080/metrics` trả về 404 (Exercise 7.4):** Trong [nginx.conf](06-lab-complete/benchmark-observability/production/nginx/nginx.conf), `location = /metrics { return 404; }` chủ động chặn truy cập `/metrics` từ bên ngoài để tránh lộ thông tin nội bộ (route, lưu lượng, model, chi phí); chỉ Prometheus trong mạng nội bộ `obs_net` mới scrape trực tiếp `agent:8000/metrics`.
 - **Tại sao `input_tokens > output_tokens`:** Trong `mock_llm.py`, prompt đầu vào của v2 gồm `SYSTEM_PROMPT + context (tài liệu RAG) + question` (~70–95 tokens), dài hơn câu trả lời ngắn gọn ở đầu ra (~30–55 tokens). Thực tế chạy 2 câu trên `production/app` ghi nhận `input=150` tokens so với `output=77` tokens.
@@ -113,7 +120,12 @@ agent_info{model="mock-llm-small",version="v2"} 1.0
 - **Thí nghiệm D (`docker pause` thay vì `docker stop` và lỗi 504 ở Nginx):** `docker stop` làm container biến mất khỏi Docker DNS nên Prometheus không còn thấy target để báo `up == 0`; `docker pause` giữ nguyên IP trong DNS nhưng container treo nên Prometheus scrape lỗi → `up == 0` sau 30s (`AgentInstanceDown`). Lỗi 504 do Nginx timeout (`proxy_read_timeout 10s`) xảy ra trước khi agent trả response, nên `http_requests_total` của agent không ghi nhận — cần theo dõi cả metric của Nginx và synthetic monitoring từ bên ngoài.
 
 ### 4.3 Debug bằng trace
-- Trong `06-lab-complete/benchmark-observability/production/app/main.py`, mỗi request tạo cây span: `POST /ask` → `agent.run` → `agent.retrieve_context` + `chat <llm_model>`. Span chiếm nhiều thời gian nhất khi có tail latency là `chat mock-llm-small` (hoặc `chat mock-llm-large`). Dòng log JSON ghi kèm `trace_id` và `span_id` từ `current_trace_ids()` để tra cứu chéo trực tiếp sang Jaeger. *(Chưa có `trace_id` thật từ Jaeger vì chưa chạy được container Jaeger).*
+Quan sát trực tiếp từ ảnh trace Jaeger [jaeger-error-trace.png](screenshots/jaeger-error-trace.png) và [jaeger-slow-trace.png](screenshots/jaeger-slow-trace.png):
+
+- Trace ID (rút gọn hiển thị trên Jaeger UI): `f936069` (`observable-agent: POST /ask`, HTTP `503`)
+- Tổng thời gian: `113 ms` (4 spans, depth 3)
+- Span chiếm nhiều thời gian nhất: `chat mock-llm-small` (`94.2 ms`, chiếm **83.4%** tổng thời gian request), trong khi `agent.retrieve_context` chỉ mất `16.4 ms` (**14.5%**).
+- Tương tự ở danh sách trace trong Jaeger (`jaeger-slow-trace.png`), các trace chậm nhất đạt gần `900 ms` đều do thời gian chờ ở span LLM (`chat mock-llm-small`). Dòng log JSON của agent tự động gắn `trace_id` và `span_id` từ `current_trace_ids()` để liên kết chéo với Jaeger.
 
 ---
 
